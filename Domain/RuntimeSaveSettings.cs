@@ -79,7 +79,7 @@ public sealed class RuntimeSaveSettings
     public List<InitialDeliveryTrackRule> InitialDeliveryTracks { get; set; } = new List<InitialDeliveryTrackRule>();
 
     [DataMember(Name = "starterBundleDefinitionIds", Order = 24)]
-    public List<string> StarterBundleDefinitionIds { get; set; } = new List<string> { "LocoDE2", "CarFlatcar", "CarFlatcar", "CarFlatcar" };
+    public List<string> StarterBundleDefinitionIds { get; set; } = new List<string> { "LocoDE2", "FlatbedEmpty", "FlatbedEmpty", "FlatbedEmpty" };
 
     [DataMember(Name = "enableStrictWorldPopulation", Order = 25)]
     public bool EnableStrictWorldPopulation { get; set; }
