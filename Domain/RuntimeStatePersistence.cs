@@ -202,22 +202,23 @@ public sealed class AcquisitionRuntimeStateProvider : IRuntimeStatePayloadProvid
     }
 
     public CompanyLiquidationRecord DissolveCompanyFor(string commandId, string actorId, string companyId, long debts, long penalties,
-        INetworkRoleDetector authority, IAssetReleaseGuard releaseGuard, IExistingVehicleOwnershipAdapter world, ICompanyContractCancellationPort contracts)
+        INetworkRoleDetector authority, IAssetReleaseGuard releaseGuard, IExistingVehicleOwnershipAdapter world, ICompanyContractCancellationPort contracts,
+        ICompanyLiquidationCheckpointPort? checkpoint = null)
     {
         lock (gate)
         {
             RequireHost(authority); EnsurePersistentPlayer(actorId);
-            return new CompanyLiquidationEngine(current!, authority, releaseGuard, world, contracts).Dissolve(commandId, actorId, companyId, debts, penalties);
+            return new CompanyLiquidationEngine(current!, authority, releaseGuard, world, contracts, checkpoint).Dissolve(commandId, actorId, companyId, debts, penalties);
         }
     }
 
     public IReadOnlyList<CompanyLiquidationRecord> ReconcilePendingCompanyLiquidations(INetworkRoleDetector authority, IAssetReleaseGuard releaseGuard,
-        IExistingVehicleOwnershipAdapter world, ICompanyContractCancellationPort contracts)
+        IExistingVehicleOwnershipAdapter world, ICompanyContractCancellationPort contracts, ICompanyLiquidationCheckpointPort? checkpoint = null)
     {
         lock (gate)
         {
             RequireHost(authority);
-            var engine = new CompanyLiquidationEngine(current!, authority, releaseGuard, world, contracts);
+            var engine = new CompanyLiquidationEngine(current!, authority, releaseGuard, world, contracts, checkpoint);
             return current!.CompanyLiquidations.Where(x => x.State == CompanyLiquidationState.ReconcileRequired).Select(x => x.CommandId).ToArray().Select(engine.Reconcile).ToArray();
         }
     }
