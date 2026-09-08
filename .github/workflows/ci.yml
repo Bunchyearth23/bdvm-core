@@ -33,7 +33,7 @@ jobs:
           readme = (root / 'README.md').read_text(encoding='utf-8')
           compatibility = (root / 'COMPATIBILITY.md').read_text(encoding='utf-8')
           notice = (root / 'NOTICE').read_text(encoding='utf-8')
-          for token in ['Copyright 2026 Arnaud (Bunchyearth23)', 'Apache License, Version 2.0']:
+          for token in ['Copyright 2026 Bunchy (Bunchyearth23)', 'Apache License, Version 2.0']:
               if token not in notice:
                   raise SystemExit(f'NOTICE missing {token}')
           if len(readme) < 1500 or '## Compatibility' not in readme:
