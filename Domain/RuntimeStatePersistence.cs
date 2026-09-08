@@ -186,9 +186,16 @@ public sealed class AcquisitionRuntimeStateProvider : IRuntimeStatePayloadProvid
     {
         lock (gate)
         {
-            RequireHost(authority); var player = EnsurePersistentPlayer(playerId); if (player.CompanyId == null) return new CommandRecord { CommandId = commandId, RequesterId = playerId, State = CommandState.Succeeded, ResultCode = "already-independent" };
-            var company = current!.Economy.Companies.Single(x => x.CompanyId == player.CompanyId);
-            return new CompanyEconomyEngine(current.Economy).Leave(new EconomyCommand { CommandId = commandId, RequesterId = player.PlayerId, CompanyId = company.CompanyId, ExpectedVersions = new Dictionary<string, long> { ["player:" + player.PlayerId] = player.Version, ["company:" + company.CompanyId] = company.Version } });
+            RequireHost(authority); var player = EnsurePersistentPlayer(playerId);
+            var expectedVersions = new Dictionary<string, long> { ["player:" + player.PlayerId] = player.Version };
+            string? companyId = null;
+            if (player.CompanyId != null)
+            {
+                var company = current!.Economy.Companies.Single(x => x.CompanyId == player.CompanyId);
+                companyId = company.CompanyId;
+                expectedVersions["company:" + company.CompanyId] = company.Version;
+            }
+            return new CompanyEconomyEngine(current!.Economy).Leave(new EconomyCommand { CommandId = commandId, RequesterId = player.PlayerId, CompanyId = companyId, ExpectedVersions = expectedVersions });
         }
     }
 
@@ -241,6 +248,11 @@ public sealed class AcquisitionRuntimeStateProvider : IRuntimeStatePayloadProvid
     public OperatingCostRecord CompleteLocalOperatingCost(string sessionId, long vanillaBalanceAfter, decimal conditionAfter, INetworkRoleDetector authority)
     {
         lock (gate) { RequireHost(authority); return new OperatingCostEngine(current!, authority).Complete(sessionId, vanillaBalanceAfter, conditionAfter); }
+    }
+
+    public OperatingCostRecord CancelLocalOperatingCost(string sessionId, long observedVanillaBalance, INetworkRoleDetector authority)
+    {
+        lock (gate) { RequireHost(authority); return new OperatingCostEngine(current!, authority).Cancel(sessionId, observedVanillaBalance); }
     }
 
     public OperatingCostRecord MarkLocalOperatingCostExternalSettlement(string sessionId, long observedVanillaBalance, INetworkRoleDetector authority)
@@ -388,6 +400,55 @@ public sealed class AcquisitionRuntimeStateProvider : IRuntimeStatePayloadProvid
         {
             var engine = new FiniteMarketEngine(current ?? throw new InvalidOperationException("Runtime state is not initialized from SaveGameData."), authority, world, delivery);
             return current.Market.Purchases.Where(x => x.State == MarketPurchaseState.ReconcileRequired).Select(x => x.CommandId).ToArray().Select(engine.Reconcile).ToArray();
+        }
+    }
+
+    public InitialDeliveryGrant GrantLocalStarterBundle(string commandId, IReadOnlyList<string> definitionIds,
+        INetworkRoleDetector authority)
+    {
+        lock (gate)
+        {
+            var player = EnsureLocalPlayer();
+            return GrantStarterBundleFor(commandId, player.PlayerId, definitionIds, authority);
+        }
+    }
+
+    public InitialDeliveryGrant GrantStarterBundleFor(string commandId, string playerId, IReadOnlyList<string> definitionIds,
+        INetworkRoleDetector authority)
+    {
+        lock (gate)
+        {
+            RequireHost(authority); EnsurePersistentPlayer(playerId);
+            return new InitialDeliveryEngine(current!, authority, new DisabledInitialDeliveryPort()).GrantStarterBundle(commandId, playerId, definitionIds);
+        }
+    }
+
+    public InitialDeliveryGrant PlaceLocalInitialDelivery(string commandId, string grantId, string trackId,
+        InitialDeliveryTargetKind targetKind, INetworkRoleDetector authority, IInitialDeliveryPort delivery)
+    {
+        lock (gate)
+        {
+            var player = EnsureLocalPlayer();
+            var grant = current!.InitialDeliveries.Single(x => x.GrantId == grantId);
+            return new InitialDeliveryEngine(current, authority, delivery).Place(new InitialDeliveryCommand
+            {
+                CommandId = commandId,
+                RequesterId = player.PlayerId,
+                GrantId = grantId,
+                TargetTrackId = trackId,
+                TargetKind = targetKind,
+                ExpectedGrantVersion = grant.Version
+            });
+        }
+    }
+
+    public IReadOnlyList<InitialDeliveryGrant> ReconcilePendingInitialDeliveries(INetworkRoleDetector authority,
+        IInitialDeliveryPort delivery)
+    {
+        lock (gate)
+        {
+            var engine = new InitialDeliveryEngine(current ?? throw new InvalidOperationException("Runtime state is not initialized from SaveGameData."), authority, delivery);
+            return current.InitialDeliveries.Where(x => x.State == InitialDeliveryState.PlacementPending || x.State == InitialDeliveryState.ReconcileRequired).Select(x => x.GrantId).ToArray().Select(engine.Reconcile).ToArray();
         }
     }
 

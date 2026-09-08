@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Runtime.Serialization;
 using System.Runtime.Serialization.Json;
@@ -74,6 +75,12 @@ public sealed class RuntimeSaveSettings
     [DataMember(Name = "enableTriageAssistance", Order = 22)]
     public bool EnableTriageAssistance { get; set; }
 
+    [DataMember(Name = "initialDeliveryTracks", Order = 23)]
+    public List<InitialDeliveryTrackRule> InitialDeliveryTracks { get; set; } = new List<InitialDeliveryTrackRule>();
+
+    [DataMember(Name = "starterBundleDefinitionIds", Order = 24)]
+    public List<string> StarterBundleDefinitionIds { get; set; } = new List<string> { "LocoDE2", "CarFlatcar", "CarFlatcar", "CarFlatcar" };
+
     public static RuntimeSaveSettings SafeDefaults() => new RuntimeSaveSettings();
 
     public static RuntimeSaveSettings Load(string path, Action<string>? warning = null)
@@ -94,4 +101,11 @@ public sealed class RuntimeSaveSettings
             return SafeDefaults();
         }
     }
+}
+
+[DataContract]
+public sealed class InitialDeliveryTrackRule
+{
+    [DataMember(Name = "trackId", Order = 1)] public string TrackId { get; set; } = "";
+    [DataMember(Name = "kind", Order = 2)] public InitialDeliveryTargetKind Kind { get; set; }
 }
