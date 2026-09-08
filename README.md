@@ -35,7 +35,7 @@ Core does not implement company rules, vehicle ownership, market pricing, contra
 
 ## Dependencies
 
-The project-level dependency is `BDVM.Common`. The integration sources additionally require Derail Valley, Unity and Unity Mod Manager assemblies when compiled by `BDVM.Full`.
+The project-level dependency is `BDVM.Common`. There is no third-party mod dependency. The integration sources additionally require the proprietary Derail Valley/Unity assemblies and Unity Mod Manager when compiled by `BDVM.Full`; those game files are referenced locally and are not redistributed by this repository.
 
 ## Build
 
