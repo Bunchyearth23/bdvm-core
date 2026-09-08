@@ -81,6 +81,12 @@ public sealed class RuntimeSaveSettings
     [DataMember(Name = "starterBundleDefinitionIds", Order = 24)]
     public List<string> StarterBundleDefinitionIds { get; set; } = new List<string> { "LocoDE2", "CarFlatcar", "CarFlatcar", "CarFlatcar" };
 
+    [DataMember(Name = "enableStrictWorldPopulation", Order = 25)]
+    public bool EnableStrictWorldPopulation { get; set; }
+
+    [DataMember(Name = "worldPopulationPolicy", Order = 26)]
+    public WorldPopulationPolicy WorldPopulationPolicy { get; set; } = WorldPopulationPolicy.StrictDefaults();
+
     public static RuntimeSaveSettings SafeDefaults() => new RuntimeSaveSettings();
 
     public static RuntimeSaveSettings Load(string path, Action<string>? warning = null)
