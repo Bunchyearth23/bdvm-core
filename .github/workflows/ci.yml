@@ -17,7 +17,7 @@ jobs:
         run: |
           import json, pathlib, re, xml.etree.ElementTree as ET
           root = pathlib.Path('.')
-          required = ['README.md', 'LICENSE', 'module.json', 'COMPATIBILITY.md']
+          required = ['README.md', 'LICENSE', 'NOTICE', 'module.json', 'COMPATIBILITY.md']
           missing = [name for name in required if not (root / name).is_file()]
           if missing:
               raise SystemExit(f'missing published files: {missing}')
@@ -32,10 +32,13 @@ jobs:
           ET.parse(projects[0])
           readme = (root / 'README.md').read_text(encoding='utf-8')
           compatibility = (root / 'COMPATIBILITY.md').read_text(encoding='utf-8')
+          notice = (root / 'NOTICE').read_text(encoding='utf-8')
+          for token in ['Copyright 2026 Arnaud (Bunchyearth23)', 'Apache License, Version 2.0']:
+              if token not in notice:
+                  raise SystemExit(f'NOTICE missing {token}')
           if len(readme) < 1500 or '## Compatibility' not in readme:
               raise SystemExit('README compatibility contract is incomplete')
           for token in ['Module API', 'Checkpoint', 'Module absent', 'Older major']:
               if token not in compatibility:
                   raise SystemExit(f'compatibility matrix missing {token}')
           print(f"validated {manifest['id']} {manifest['version']}")
-
