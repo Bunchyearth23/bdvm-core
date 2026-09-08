@@ -424,13 +424,14 @@ public sealed class AcquisitionRuntimeStateProvider : IRuntimeStatePayloadProvid
     }
 
     public InitialDeliveryGrant PlaceLocalInitialDelivery(string commandId, string grantId, string trackId,
-        InitialDeliveryTargetKind targetKind, INetworkRoleDetector authority, IInitialDeliveryPort delivery)
+        InitialDeliveryTargetKind targetKind, INetworkRoleDetector authority, IInitialDeliveryPort delivery,
+        IInitialDeliveryCheckpointPort? checkpoint = null)
     {
         lock (gate)
         {
             var player = EnsureLocalPlayer();
             var grant = current!.InitialDeliveries.Single(x => x.GrantId == grantId);
-            return new InitialDeliveryEngine(current, authority, delivery).Place(new InitialDeliveryCommand
+            return new InitialDeliveryEngine(current, authority, delivery, checkpoint).Place(new InitialDeliveryCommand
             {
                 CommandId = commandId,
                 RequesterId = player.PlayerId,
@@ -443,11 +444,11 @@ public sealed class AcquisitionRuntimeStateProvider : IRuntimeStatePayloadProvid
     }
 
     public IReadOnlyList<InitialDeliveryGrant> ReconcilePendingInitialDeliveries(INetworkRoleDetector authority,
-        IInitialDeliveryPort delivery)
+        IInitialDeliveryPort delivery, IInitialDeliveryCheckpointPort? checkpoint = null)
     {
         lock (gate)
         {
-            var engine = new InitialDeliveryEngine(current ?? throw new InvalidOperationException("Runtime state is not initialized from SaveGameData."), authority, delivery);
+            var engine = new InitialDeliveryEngine(current ?? throw new InvalidOperationException("Runtime state is not initialized from SaveGameData."), authority, delivery, checkpoint);
             return current.InitialDeliveries.Where(x => x.State == InitialDeliveryState.PlacementPending || x.State == InitialDeliveryState.ReconcileRequired).Select(x => x.GrantId).ToArray().Select(engine.Reconcile).ToArray();
         }
     }
