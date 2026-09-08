@@ -1,5 +1,8 @@
 # BDVM - Core
 
+**BDVM** stands for **Bunchy's Derail Valley Mods**, the common banner for this
+modular Derail Valley project.
+
 `BDVM.Core` provides the module registry, capability discovery, persistence model, diagnostics and authority policies used by the BDVM runtime.
 
 ## Status
