@@ -1,6 +1,6 @@
 # Compatibility matrix
 
-This file is the published compatibility contract for **BDVM.Core 1.2.0**. It describes the current incremental release; it is not a promise that BDVM is feature-complete.
+This file is the published compatibility contract for **BDVM.Core 1.3.0**. It describes the current incremental release; it is not a promise that BDVM is feature-complete.
 
 ## Current line
 
@@ -26,4 +26,3 @@ This release is selected by these dependency-closed profiles: **minimal, economi
 | Older major | Refuse before registration and leave authoritative state untouched. |
 
 Game, save/reload and host/client behavior still requires the release's documented manual runtime campaign. Repository CI validates this contract and metadata; it does not claim Unity runtime validation.
-
