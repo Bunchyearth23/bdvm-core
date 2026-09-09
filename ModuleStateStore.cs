@@ -7,6 +7,14 @@ using BDVM.Common;
 
 namespace BDVM.Core;
 
+public enum ModulePayloadReadState { Missing, Compatible, Incompatible }
+
+public sealed class ModulePayloadReadResult
+{
+    public ModulePayloadReadState State { get; set; }
+    public BdvmModulePayload? Payload { get; set; }
+}
+
 public sealed class ModuleStateStore
 {
     private readonly BdvmCheckpointEnvelope envelope;
@@ -20,6 +28,7 @@ public sealed class ModuleStateStore
     private ModuleStateStore(BdvmCheckpointEnvelope envelope) => this.envelope = envelope;
 
     public string CheckpointId => envelope.CheckpointId;
+    public string[] ModuleIds => envelope.Modules.Select(x => x.ModuleId).OrderBy(x => x, StringComparer.OrdinalIgnoreCase).ToArray();
     public void Put(string moduleId, string schema, int schemaVersion, string payload)
     {
         if (string.IsNullOrWhiteSpace(moduleId) || string.IsNullOrWhiteSpace(schema) || schemaVersion <= 0 || payload == null)
@@ -37,8 +46,19 @@ public sealed class ModuleStateStore
 
     public bool TryGet(string moduleId, out BdvmModulePayload payload)
     {
-        payload = envelope.Modules.SingleOrDefault(x => string.Equals(x.ModuleId, moduleId, StringComparison.OrdinalIgnoreCase))!;
-        return payload != null;
+        var stored = envelope.Modules.SingleOrDefault(x => string.Equals(x.ModuleId, moduleId, StringComparison.OrdinalIgnoreCase));
+        payload = stored == null ? null! : Clone(stored);
+        return stored != null;
+    }
+
+    public ModulePayloadReadResult ReadCompatible(string moduleId, string schema, int minimumVersion, int maximumVersion)
+    {
+        if (string.IsNullOrWhiteSpace(moduleId) || string.IsNullOrWhiteSpace(schema) || minimumVersion <= 0 || maximumVersion < minimumVersion)
+            throw new ArgumentException("A valid module identity, schema and version range are required.");
+        var stored = envelope.Modules.SingleOrDefault(x => string.Equals(x.ModuleId, moduleId, StringComparison.OrdinalIgnoreCase));
+        if (stored == null) return new ModulePayloadReadResult { State = ModulePayloadReadState.Missing };
+        var compatible = string.Equals(stored.Schema, schema, StringComparison.Ordinal) && stored.SchemaVersion >= minimumVersion && stored.SchemaVersion <= maximumVersion;
+        return new ModulePayloadReadResult { State = compatible ? ModulePayloadReadState.Compatible : ModulePayloadReadState.Incompatible, Payload = Clone(stored) };
     }
 
     public string Serialize()
@@ -70,4 +90,12 @@ public sealed class ModuleStateStore
             value.Modules.GroupBy(x => x.ModuleId, StringComparer.OrdinalIgnoreCase).Any(x => x.Count() != 1))
             throw new InvalidDataException("Invalid or duplicate BDVM module payload.");
     }
+
+    private static BdvmModulePayload Clone(BdvmModulePayload value) => new BdvmModulePayload
+    {
+        ModuleId = value.ModuleId,
+        Schema = value.Schema,
+        SchemaVersion = value.SchemaVersion,
+        Payload = value.Payload
+    };
 }
