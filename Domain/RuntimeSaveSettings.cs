@@ -87,6 +87,9 @@ public sealed class RuntimeSaveSettings
     [DataMember(Name = "worldPopulationPolicy", Order = 26)]
     public WorldPopulationPolicy WorldPopulationPolicy { get; set; } = WorldPopulationPolicy.StrictDefaults();
 
+    [DataMember(Name = "startingPersonalBalance", Order = 27)]
+    public long StartingPersonalBalance { get; set; } = 2000;
+
     public static RuntimeSaveSettings SafeDefaults() => new RuntimeSaveSettings();
 
     public static RuntimeSaveSettings Load(string path, Action<string>? warning = null)
@@ -98,7 +101,10 @@ public sealed class RuntimeSaveSettings
             using (var stream = File.OpenRead(path))
             {
                 var serializer = new DataContractJsonSerializer(typeof(RuntimeSaveSettings));
-                return serializer.ReadObject(stream) as RuntimeSaveSettings ?? throw new InvalidDataException("Runtime settings are empty.");
+                var settings = serializer.ReadObject(stream) as RuntimeSaveSettings ?? throw new InvalidDataException("Runtime settings are empty.");
+                if (settings.StartingPersonalBalance < 0 || settings.StartingPersonalBalance > 1_000_000_000_000L)
+                    throw new InvalidDataException("The starting personal balance is outside the supported range.");
+                return settings;
             }
         }
         catch (Exception exception)

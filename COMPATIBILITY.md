@@ -7,7 +7,7 @@ This file is the published compatibility contract for **BDVM.Core 1.3.0**. It de
 | Surface | Accepted line | Refusal behavior |
 | --- | --- | --- |
 | Module API | 1.x | An older or newer major is refused before registration. |
-| Checkpoint | `bdvm.checkpoint` schema 2 | Unknown schemas and legacy DVCompany packages are refused without mutation. |
+| Checkpoint | `bdvm.checkpoint` schema 2 | Unknown schemas and unsupported legacy packages are refused without mutation. |
 | Web API | 1.0 when applicable | An incompatible web module is disabled without stopping the host or other modules. |
 | External runtime dependencies | None | A missing optional runtime disables only the dependent bridge or feature. |
 

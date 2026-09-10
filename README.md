@@ -56,7 +56,7 @@ Pure domain behavior is exercised by the BDVM domain validation suite; compositi
 
 ## Compatibility
 
-Checkpoint readers must tolerate unknown payloads and reject corrupt authoritative state safely. Networked mutations are host-authoritative. No compatibility facade or automatic import of legacy `DVCompany` checkpoints is provided.
+Checkpoint readers must tolerate unknown payloads and reject corrupt authoritative state safely. Networked mutations are host-authoritative. No compatibility facade or automatic import of unsupported prototype checkpoints is provided.
 
 ## License
 

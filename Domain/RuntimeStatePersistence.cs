@@ -90,15 +90,36 @@ public sealed class AcquisitionRuntimeStateProvider : IRuntimeStatePayloadProvid
     }
 
     public CommandRecord SynchronizeLocalWallet(string commandId, long authoritativeBalance, string source)
+        => SynchronizeWalletFor(commandId, EnsureLocalPlayer(authoritativeBalance).PlayerId, authoritativeBalance, source);
+
+    public CommandRecord SynchronizeWalletFor(string commandId, string playerId, long authoritativeBalance, string source)
     {
         lock (gate)
         {
-            var player = EnsureLocalPlayer(authoritativeBalance);
+            var player = EnsurePersistentPlayer(playerId, authoritativeBalance);
             var wallet = current!.Economy.Wallets.Single(x => x.Account.Kind == AccountKind.Player && x.Account.OwnerId == player.PlayerId);
             if (wallet.Balance == authoritativeBalance)
                 return new CommandRecord { CommandId = commandId, RequesterId = player.PlayerId, State = CommandState.Succeeded, ResultCode = "wallet-current" };
             return new CompanyEconomyEngine(current.Economy).SynchronizePersonalWallet(
                 new EconomyCommand { CommandId = commandId, RequesterId = player.PlayerId }, authoritativeBalance, source);
+        }
+    }
+
+    public ExternalWalletMirrorPlan PlanExternalWalletMirror(string playerId, long externalBalance, string operationId)
+    {
+        lock (gate)
+        {
+            EnsurePersistentPlayer(playerId, externalBalance);
+            return new ExternalWalletMirrorEngine(current!.Economy).Plan(playerId, externalBalance, operationId);
+        }
+    }
+
+    public ExternalWalletMirrorRecord CompleteExternalWalletMirror(string playerId, long synchronizedBalance, string operationId)
+    {
+        lock (gate)
+        {
+            EnsurePersistentPlayer(playerId, synchronizedBalance);
+            return new ExternalWalletMirrorEngine(current!.Economy).Complete(playerId, synchronizedBalance, operationId);
         }
     }
 
@@ -232,41 +253,60 @@ public sealed class AcquisitionRuntimeStateProvider : IRuntimeStatePayloadProvid
 
     public OperatingCostRecord BeginLocalOperatingCost(string sessionId, string assetId, MaintenanceAction action, bool companyPayer,
         long maximumAuthorizedCost, long vanillaBalanceBefore, decimal conditionBefore, string? tripId, INetworkRoleDetector authority)
+        => BeginOperatingCostFor(sessionId, EnsureLocalPlayer().PlayerId, assetId, action, companyPayer, maximumAuthorizedCost, vanillaBalanceBefore, conditionBefore, tripId, authority);
+
+    public OperatingCostRecord BeginOperatingCostFor(string sessionId, string playerId, string assetId, MaintenanceAction action, bool companyPayer,
+        long maximumAuthorizedCost, long authoritativeBalanceBefore, decimal conditionBefore, string? tripId, INetworkRoleDetector authority,
+        OperatingCostSettlementMode settlementMode = OperatingCostSettlementMode.PersonalExternalWallet)
     {
         lock (gate)
         {
-            RequireHost(authority); var player = EnsureLocalPlayer();
+            RequireHost(authority); var player = EnsurePersistentPlayer(playerId);
             var payer = companyPayer ? AccountRef.Company(player.CompanyId ?? throw new InvalidOperationException("Company payer requires company membership.")) : AccountRef.Player(player.PlayerId);
             return new OperatingCostEngine(current!, authority).Begin(new ManualMaintenanceRequest
             {
                 CommandId = sessionId, RequesterId = player.PlayerId, AssetId = assetId, Action = action, Payer = payer,
                 MaximumAuthorizedCost = maximumAuthorizedCost, ExplicitUserConfirmation = true
-            }, vanillaBalanceBefore, conditionBefore, tripId);
+            }, authoritativeBalanceBefore, conditionBefore, tripId, settlementMode);
         }
     }
 
     public OperatingCostRecord CompleteLocalOperatingCost(string sessionId, long vanillaBalanceAfter, decimal conditionAfter, INetworkRoleDetector authority)
-    {
-        lock (gate) { RequireHost(authority); return new OperatingCostEngine(current!, authority).Complete(sessionId, vanillaBalanceAfter, conditionAfter); }
-    }
+        => CompleteOperatingCostFor(EnsureLocalPlayer().PlayerId, sessionId, vanillaBalanceAfter, conditionAfter, authority);
+
+    public OperatingCostRecord CompleteOperatingCostFor(string playerId, string sessionId, long authoritativeBalanceAfter, decimal conditionAfter, INetworkRoleDetector authority)
+    { lock (gate) { RequireHost(authority); RequireOperatingCostRequester(playerId, sessionId); return new OperatingCostEngine(current!, authority).Complete(sessionId, authoritativeBalanceAfter, conditionAfter); } }
 
     public OperatingCostRecord CancelLocalOperatingCost(string sessionId, long observedVanillaBalance, INetworkRoleDetector authority)
-    {
-        lock (gate) { RequireHost(authority); return new OperatingCostEngine(current!, authority).Cancel(sessionId, observedVanillaBalance); }
-    }
+        => CancelOperatingCostFor(EnsureLocalPlayer().PlayerId, sessionId, observedVanillaBalance, authority);
+
+    public OperatingCostRecord CancelOperatingCostFor(string playerId, string sessionId, long observedAuthoritativeBalance, INetworkRoleDetector authority)
+    { lock (gate) { RequireHost(authority); RequireOperatingCostRequester(playerId, sessionId); return new OperatingCostEngine(current!, authority).Cancel(sessionId, observedAuthoritativeBalance); } }
 
     public OperatingCostRecord MarkLocalOperatingCostExternalSettlement(string sessionId, long observedVanillaBalance, INetworkRoleDetector authority)
+        => MarkOperatingCostExternalSettlementFor(EnsureLocalPlayer().PlayerId, sessionId, observedVanillaBalance, authority);
+
+    public OperatingCostRecord MarkOperatingCostExternalSettlementFor(string playerId, string sessionId, long observedAuthoritativeBalance, INetworkRoleDetector authority)
+    { lock (gate) { RequireHost(authority); RequireOperatingCostRequester(playerId, sessionId); return new OperatingCostEngine(current!, authority).MarkExternalSettlement(sessionId, observedAuthoritativeBalance); } }
+
+    private void RequireOperatingCostRequester(string playerId, string sessionId)
     {
-        lock (gate) { RequireHost(authority); return new OperatingCostEngine(current!, authority).MarkExternalSettlement(sessionId, observedVanillaBalance); }
+        EnsurePersistentPlayer(playerId);
+        var record = current!.OperatingCosts.Single(value => value.SessionId == sessionId);
+        if (!string.Equals(record.RequesterId, playerId, StringComparison.Ordinal))
+            throw new UnauthorizedAccessException("Only the player who opened the operating-cost session may settle it.");
     }
 
     public CommandRecord TransferLocalCompany(string commandId, long amount, bool toCompany)
+        => TransferCompanyFor(commandId, EnsureLocalPlayer().PlayerId, amount, toCompany);
+
+    public CommandRecord TransferCompanyFor(string commandId, string playerId, long amount, bool toCompany)
     {
         lock (gate)
         {
-            var player = EnsureLocalPlayer();
+            var player = EnsurePersistentPlayer(playerId);
             if (string.IsNullOrWhiteSpace(player.CompanyId))
-                throw new InvalidOperationException("The local player does not belong to a company.");
+                throw new InvalidOperationException("The player does not belong to a company.");
             var playerAccount = AccountRef.Player(player.PlayerId);
             var companyAccount = AccountRef.Company(player.CompanyId!);
             var debit = toCompany ? playerAccount : companyAccount;
@@ -367,10 +407,14 @@ public sealed class AcquisitionRuntimeStateProvider : IRuntimeStatePayloadProvid
 
     public MarketPurchaseRecord PurchaseLocalMarket(string commandId, string listingId, bool forCompany, INetworkRoleDetector authority,
         IExistingVehicleOwnershipAdapter world, IMarketDeliveryPort delivery)
+        => PurchaseMarketFor(commandId, EnsureLocalPlayer().PlayerId, listingId, forCompany, authority, world, delivery);
+
+    public MarketPurchaseRecord PurchaseMarketFor(string commandId, string playerId, string listingId, bool forCompany, INetworkRoleDetector authority,
+        IExistingVehicleOwnershipAdapter world, IMarketDeliveryPort delivery)
     {
         lock (gate)
         {
-            var player = EnsureLocalPlayer(); var listing = current!.Market.Listings.Single(x => x.ListingId == listingId);
+            var player = EnsurePersistentPlayer(playerId); var listing = current!.Market.Listings.Single(x => x.ListingId == listingId);
             var payer = forCompany ? AccountRef.Company(player.CompanyId ?? throw new InvalidOperationException("Company purchase requires membership.")) : AccountRef.Player(player.PlayerId);
             var buyer = forCompany ? AssetOwnerRef.Company(player.CompanyId!) : AssetOwnerRef.Player(player.PlayerId);
             var wallet = current.Economy.Wallets.Single(x => x.Account.Key == payer.Key);
@@ -426,10 +470,15 @@ public sealed class AcquisitionRuntimeStateProvider : IRuntimeStatePayloadProvid
     public InitialDeliveryGrant PlaceLocalInitialDelivery(string commandId, string grantId, string trackId,
         InitialDeliveryTargetKind targetKind, INetworkRoleDetector authority, IInitialDeliveryPort delivery,
         IInitialDeliveryCheckpointPort? checkpoint = null)
+        => PlaceInitialDeliveryFor(commandId, EnsureLocalPlayer().PlayerId, grantId, trackId, targetKind, authority, delivery, checkpoint);
+
+    public InitialDeliveryGrant PlaceInitialDeliveryFor(string commandId, string playerId, string grantId, string trackId,
+        InitialDeliveryTargetKind targetKind, INetworkRoleDetector authority, IInitialDeliveryPort delivery,
+        IInitialDeliveryCheckpointPort? checkpoint = null)
     {
         lock (gate)
         {
-            var player = EnsureLocalPlayer();
+            var player = EnsurePersistentPlayer(playerId);
             var grant = current!.InitialDeliveries.Single(x => x.GrantId == grantId);
             return new InitialDeliveryEngine(current, authority, delivery, checkpoint).Place(new InitialDeliveryCommand
             {
@@ -460,15 +509,36 @@ public sealed class AcquisitionRuntimeStateProvider : IRuntimeStatePayloadProvid
         lock (gate) { return new LeaseEngine(current ?? throw new InvalidOperationException("Runtime state is not initialized from SaveGameData."), authority, releaseGuard, world).CreateOffer(leaseId, assetIds, deposit, initialFee, rent, interval, duration, purchaseOption, condition, maximumDamageCharge); }
     }
 
+    public LeaseContract CreateLocalCatalogLeaseOffer(string leaseId, IReadOnlyList<string> definitionIds, long deposit, long initialFee, long rent,
+        long interval, long duration, long? purchaseOption, decimal condition, long maximumDamageCharge, INetworkRoleDetector authority,
+        IAssetReleaseGuard releaseGuard, IExistingVehicleOwnershipAdapter world)
+    {
+        lock (gate) { return new LeaseEngine(current ?? throw new InvalidOperationException("Runtime state is not initialized from SaveGameData."), authority, releaseGuard, world).CreateCatalogOffer(leaseId, definitionIds, deposit, initialFee, rent, interval, duration, purchaseOption, condition, maximumDamageCharge); }
+    }
+
+    public LeaseContract CreateLocalCatalogListingLeaseOffer(string leaseId, IReadOnlyList<string> listingIds, long deposit, long initialFee, long rent,
+        long interval, long duration, long? purchaseOption, decimal condition, long maximumDamageCharge, INetworkRoleDetector authority,
+        IAssetReleaseGuard releaseGuard, IExistingVehicleOwnershipAdapter world)
+    {
+        lock (gate) { return new LeaseEngine(current ?? throw new InvalidOperationException("Runtime state is not initialized from SaveGameData."), authority, releaseGuard, world).CreateCatalogListingOffer(leaseId, listingIds, deposit, initialFee, rent, interval, duration, purchaseOption, condition, maximumDamageCharge); }
+    }
+
     public LeaseActionRecord AcceptLocalLease(string commandId, string leaseId, bool forCompany, INetworkRoleDetector authority,
+        IAssetReleaseGuard releaseGuard, IExistingVehicleOwnershipAdapter world)
+        => AcceptLeaseFor(commandId, EnsureLocalPlayer().PlayerId, leaseId, forCompany, authority, releaseGuard, world);
+
+    public LeaseActionRecord AcceptLeaseFor(string commandId, string playerId, string leaseId, bool forCompany, INetworkRoleDetector authority,
         IAssetReleaseGuard releaseGuard, IExistingVehicleOwnershipAdapter world)
     {
         lock (gate)
         {
-            var player = EnsureLocalPlayer(); var lease = current!.Leases.Single(x => x.LeaseId == leaseId);
+            var player = EnsurePersistentPlayer(playerId); var lease = current!.Leases.Single(x => x.LeaseId == leaseId);
             var payer = forCompany ? AccountRef.Company(player.CompanyId ?? throw new InvalidOperationException("Company lease requires membership.")) : AccountRef.Player(player.PlayerId);
             var lessee = forCompany ? AssetOwnerRef.Company(player.CompanyId!) : AssetOwnerRef.Player(player.PlayerId); var wallet = current.Economy.Wallets.Single(x => x.Account.Key == payer.Key);
-            return new LeaseEngine(current, authority, releaseGuard, world).Accept(commandId, player.PlayerId, leaseId, lessee, payer, lease.Version, wallet.Version);
+            var result = new LeaseEngine(current, authority, releaseGuard, world).Accept(commandId, player.PlayerId, leaseId, lessee, payer, lease.Version, wallet.Version);
+            if (result.State == LeaseActionState.Succeeded && current.Assets.Assets.Where(asset => lease.AssetIds.Contains(asset.AssetId)).Any(asset => asset.GameLink.State != PersistentLinkState.Resolved))
+                new InitialDeliveryEngine(current, authority, new DisabledInitialDeliveryPort()).GrantLeaseDelivery(commandId + ":delivery", leaseId);
+            return result;
         }
     }
 
@@ -485,11 +555,19 @@ public sealed class AcquisitionRuntimeStateProvider : IRuntimeStatePayloadProvid
 
     public LeaseActionRecord ReturnLocalLease(string commandId, string leaseId, decimal condition, INetworkRoleDetector authority,
         IAssetReleaseGuard releaseGuard, IExistingVehicleOwnershipAdapter world)
-    { lock (gate) { var player = EnsureLocalPlayer(); return new LeaseEngine(current!, authority, releaseGuard, world).Return(commandId, player.PlayerId, leaseId, condition); } }
+        => ReturnLeaseFor(commandId, EnsureLocalPlayer().PlayerId, leaseId, condition, authority, releaseGuard, world);
+
+    public LeaseActionRecord ReturnLeaseFor(string commandId, string playerId, string leaseId, decimal condition, INetworkRoleDetector authority,
+        IAssetReleaseGuard releaseGuard, IExistingVehicleOwnershipAdapter world)
+    { lock (gate) { var player = EnsurePersistentPlayer(playerId); return new LeaseEngine(current!, authority, releaseGuard, world).Return(commandId, player.PlayerId, leaseId, condition); } }
 
     public LeaseActionRecord PurchaseLocalLease(string commandId, string leaseId, INetworkRoleDetector authority,
         IAssetReleaseGuard releaseGuard, IExistingVehicleOwnershipAdapter world)
-    { lock (gate) { var player = EnsureLocalPlayer(); return new LeaseEngine(current!, authority, releaseGuard, world).ExercisePurchaseOption(commandId, player.PlayerId, leaseId); } }
+        => PurchaseLeaseFor(commandId, EnsureLocalPlayer().PlayerId, leaseId, authority, releaseGuard, world);
+
+    public LeaseActionRecord PurchaseLeaseFor(string commandId, string playerId, string leaseId, INetworkRoleDetector authority,
+        IAssetReleaseGuard releaseGuard, IExistingVehicleOwnershipAdapter world)
+    { lock (gate) { var player = EnsurePersistentPlayer(playerId); return new LeaseEngine(current!, authority, releaseGuard, world).ExercisePurchaseOption(commandId, player.PlayerId, leaseId); } }
 
     public IReadOnlyList<LeaseActionRecord> ReconcilePendingLeasePurchases(INetworkRoleDetector authority, IAssetReleaseGuard releaseGuard, IExistingVehicleOwnershipAdapter world)
     {
@@ -530,22 +608,48 @@ public sealed class AcquisitionRuntimeStateProvider : IRuntimeStatePayloadProvid
 
     public MissionAssignment ReserveLocalAssignment(string commandId, string assignmentId, string missionId, MissionAssignmentKind kind,
         IReadOnlyList<string> assetIds, bool forCompany, long maximumRevenue, INetworkRoleDetector authority, IMissionCompletionPort completion)
+        => ReserveAssignmentFor(commandId, EnsureLocalPlayer().PlayerId, assignmentId, missionId, kind, assetIds, forCompany, maximumRevenue, authority, completion);
+
+    public MissionAssignment ReserveAssignmentFor(string commandId, string playerId, string assignmentId, string missionId, MissionAssignmentKind kind,
+        IReadOnlyList<string> assetIds, bool forCompany, long maximumRevenue, INetworkRoleDetector authority, IMissionCompletionPort completion)
     {
-        lock (gate) { var player = EnsureLocalPlayer(); var op = forCompany ? AssetOwnerRef.Company(player.CompanyId ?? throw new InvalidOperationException("Company assignment requires membership.")) : AssetOwnerRef.Player(player.PlayerId); return new MissionAssignmentEngine(current!, authority, completion).Reserve(commandId, player.PlayerId, assignmentId, missionId, kind, assetIds, op, maximumRevenue); }
+        lock (gate) { var player = EnsurePersistentPlayer(playerId); var op = forCompany ? AssetOwnerRef.Company(player.CompanyId ?? throw new InvalidOperationException("Company assignment requires membership.")) : AssetOwnerRef.Player(player.PlayerId); return new MissionAssignmentEngine(current!, authority, completion).Reserve(commandId, player.PlayerId, assignmentId, missionId, kind, assetIds, op, maximumRevenue); }
     }
 
     public MissionAssignment StartLocalAssignment(string commandId, string assignmentId, long vanillaBalance, INetworkRoleDetector authority, IMissionCompletionPort completion)
-    { lock (gate) { var player = EnsureLocalPlayer(); return new MissionAssignmentEngine(current!, authority, completion).Start(commandId, player.PlayerId, assignmentId, vanillaBalance); } }
+        => StartAssignmentFor(commandId, EnsureLocalPlayer().PlayerId, assignmentId, vanillaBalance, authority, completion);
+
+    public MissionAssignment StartAssignmentFor(string commandId, string playerId, string assignmentId, long authoritativeBalance, INetworkRoleDetector authority, IMissionCompletionPort completion)
+    { lock (gate) { var player = EnsurePersistentPlayer(playerId); return new MissionAssignmentEngine(current!, authority, completion).Start(commandId, player.PlayerId, assignmentId, authoritativeBalance); } }
 
     public MissionAssignment CompleteLocalAssignment(string commandId, string assignmentId, long vanillaBalance, IReadOnlyList<string> arrivedAssetIds,
         INetworkRoleDetector authority, IMissionCompletionPort completion)
-    { lock (gate) { var player = EnsureLocalPlayer(); return new MissionAssignmentEngine(current!, authority, completion).Complete(commandId, player.PlayerId, assignmentId, vanillaBalance, arrivedAssetIds); } }
+        => CompleteAssignmentFor(commandId, EnsureLocalPlayer().PlayerId, assignmentId, vanillaBalance, arrivedAssetIds, authority, completion);
+
+    public MissionAssignment CompleteAssignmentFor(string commandId, string playerId, string assignmentId, long authoritativeBalance, IReadOnlyList<string> arrivedAssetIds,
+        INetworkRoleDetector authority, IMissionCompletionPort completion, MissionSettlementMode settlementMode = MissionSettlementMode.ExternalWalletIncludesRevenue)
+    { lock (gate) { var player = EnsurePersistentPlayer(playerId); return new MissionAssignmentEngine(current!, authority, completion).Complete(commandId, player.PlayerId, assignmentId, authoritativeBalance, arrivedAssetIds, settlementMode); } }
 
     public MissionAssignment CancelLocalAssignment(string commandId, string assignmentId, INetworkRoleDetector authority, IMissionCompletionPort completion)
-    { lock (gate) { var player = EnsureLocalPlayer(); return new MissionAssignmentEngine(current!, authority, completion).Cancel(commandId, player.PlayerId, assignmentId); } }
+        => CancelAssignmentFor(commandId, EnsureLocalPlayer().PlayerId, assignmentId, authority, completion);
+
+    public MissionAssignment CancelAssignmentFor(string commandId, string playerId, string assignmentId, INetworkRoleDetector authority, IMissionCompletionPort completion)
+    { lock (gate) { var player = EnsurePersistentPlayer(playerId); return new MissionAssignmentEngine(current!, authority, completion).Cancel(commandId, player.PlayerId, assignmentId); } }
 
     public MissionAssignment MarkLocalMissionSettlement(string assignmentId, long vanillaBalance, INetworkRoleDetector authority, IMissionCompletionPort completion)
-    { lock (gate) return new MissionAssignmentEngine(current ?? throw new InvalidOperationException("Runtime state is not initialized from SaveGameData."), authority, completion).MarkExternalSettlement(assignmentId, vanillaBalance); }
+        => MarkMissionSettlementFor(EnsureLocalPlayer().PlayerId, assignmentId, vanillaBalance, authority, completion);
+
+    public MissionAssignment MarkMissionSettlementFor(string playerId, string assignmentId, long authoritativeBalance, INetworkRoleDetector authority, IMissionCompletionPort completion)
+    {
+        lock (gate)
+        {
+            EnsurePersistentPlayer(playerId);
+            var assignment = current!.Assignments.Single(value => value.AssignmentId == assignmentId);
+            if (!string.Equals(assignment.RequestedBy, playerId, StringComparison.Ordinal))
+                throw new UnauthorizedAccessException("Only the player who reserved the assignment may settle it.");
+            return new MissionAssignmentEngine(current, authority, completion).MarkExternalSettlement(assignmentId, authoritativeBalance);
+        }
+    }
 
     public PassengerRouteDemand ConfigureLocalPassengerRoute(string commandId, string routeId, string origin, string destination, int initialDemand,
         int maximumDemand, int demandPerInterval, long desiredFrequency, long fare, long latePenalty, INetworkRoleDetector authority, IMissionCompletionPort completion)
@@ -556,17 +660,31 @@ public sealed class AcquisitionRuntimeStateProvider : IRuntimeStatePayloadProvid
 
     public PassengerServiceContract ReserveLocalPassengerService(string commandId, string contractId, string routeId, string passengerJobId,
         IReadOnlyList<string> assetIds, bool forCompany, int capacity, long departureTick, long arrivalTick, INetworkRoleDetector authority, IMissionCompletionPort completion)
-    { lock (gate) { var player = EnsureLocalPlayer(); var op = forCompany ? AssetOwnerRef.Company(player.CompanyId ?? throw new InvalidOperationException("Company passenger service requires membership.")) : AssetOwnerRef.Player(player.PlayerId); return new PassengerEconomyEngine(current!, authority, completion).OfferAndReserve(commandId, player.PlayerId, contractId, routeId, passengerJobId, assetIds, op, capacity, departureTick, arrivalTick); } }
+        => ReservePassengerServiceFor(commandId, EnsureLocalPlayer().PlayerId, contractId, routeId, passengerJobId, assetIds, forCompany, capacity, departureTick, arrivalTick, authority, completion);
+
+    public PassengerServiceContract ReservePassengerServiceFor(string commandId, string playerId, string contractId, string routeId, string passengerJobId,
+        IReadOnlyList<string> assetIds, bool forCompany, int capacity, long departureTick, long arrivalTick, INetworkRoleDetector authority, IMissionCompletionPort completion)
+    { lock (gate) { var player = EnsurePersistentPlayer(playerId); var op = forCompany ? AssetOwnerRef.Company(player.CompanyId ?? throw new InvalidOperationException("Company passenger service requires membership.")) : AssetOwnerRef.Player(player.PlayerId); return new PassengerEconomyEngine(current!, authority, completion).OfferAndReserve(commandId, player.PlayerId, contractId, routeId, passengerJobId, assetIds, op, capacity, departureTick, arrivalTick); } }
 
     public PassengerServiceContract StartLocalPassengerService(string commandId, string contractId, long vanillaBalance, long actualDepartureTick, INetworkRoleDetector authority, IMissionCompletionPort completion)
-    { lock (gate) { var player = EnsureLocalPlayer(); return new PassengerEconomyEngine(current!, authority, completion).Start(commandId, player.PlayerId, contractId, vanillaBalance, actualDepartureTick); } }
+        => StartPassengerServiceFor(commandId, EnsureLocalPlayer().PlayerId, contractId, vanillaBalance, actualDepartureTick, authority, completion);
+
+    public PassengerServiceContract StartPassengerServiceFor(string commandId, string playerId, string contractId, long authoritativeBalance, long actualDepartureTick, INetworkRoleDetector authority, IMissionCompletionPort completion)
+    { lock (gate) { var player = EnsurePersistentPlayer(playerId); return new PassengerEconomyEngine(current!, authority, completion).Start(commandId, player.PlayerId, contractId, authoritativeBalance, actualDepartureTick); } }
 
     public PassengerServiceContract CompleteLocalPassengerService(string commandId, string contractId, long vanillaBalance, long actualArrivalTick,
         IReadOnlyList<string> arrivedAssetIds, INetworkRoleDetector authority, IMissionCompletionPort completion)
-    { lock (gate) { var player = EnsureLocalPlayer(); return new PassengerEconomyEngine(current!, authority, completion).Complete(commandId, player.PlayerId, contractId, vanillaBalance, actualArrivalTick, arrivedAssetIds); } }
+        => CompletePassengerServiceFor(commandId, EnsureLocalPlayer().PlayerId, contractId, vanillaBalance, actualArrivalTick, arrivedAssetIds, authority, completion);
+
+    public PassengerServiceContract CompletePassengerServiceFor(string commandId, string playerId, string contractId, long authoritativeBalance, long actualArrivalTick,
+        IReadOnlyList<string> arrivedAssetIds, INetworkRoleDetector authority, IMissionCompletionPort completion, MissionSettlementMode settlementMode = MissionSettlementMode.ExternalWalletIncludesRevenue)
+    { lock (gate) { var player = EnsurePersistentPlayer(playerId); return new PassengerEconomyEngine(current!, authority, completion).Complete(commandId, player.PlayerId, contractId, authoritativeBalance, actualArrivalTick, arrivedAssetIds, settlementMode); } }
 
     public PassengerServiceContract CancelLocalPassengerService(string commandId, string contractId, INetworkRoleDetector authority, IMissionCompletionPort completion)
-    { lock (gate) { var player = EnsureLocalPlayer(); return new PassengerEconomyEngine(current!, authority, completion).Cancel(commandId, player.PlayerId, contractId); } }
+        => CancelPassengerServiceFor(commandId, EnsureLocalPlayer().PlayerId, contractId, authority, completion);
+
+    public PassengerServiceContract CancelPassengerServiceFor(string commandId, string playerId, string contractId, INetworkRoleDetector authority, IMissionCompletionPort completion)
+    { lock (gate) { var player = EnsurePersistentPlayer(playerId); return new PassengerEconomyEngine(current!, authority, completion).Cancel(commandId, player.PlayerId, contractId); } }
 
     public DynamicMarketPolicy ConfigureLocalDynamicMarketPolicy(string commandId, string categoryId, decimal minimum, decimal maximum,
         decimal smoothing, decimal maximumStep, decimal supplyWeight, decimal demandWeight, decimal utilizationWeight, INetworkRoleDetector authority)
@@ -628,10 +746,14 @@ public sealed class AcquisitionRuntimeStateProvider : IRuntimeStatePayloadProvid
 
     public FleetCommandRecord ManageLocalFleet(string commandId, string assetId, FleetCommandAction action, INetworkRoleDetector authority,
         FleetOperationalState? operationalState = null, AssetOwnerRef? target = null, string? displayName = null)
+        => ManageFleetFor(commandId, EnsureLocalPlayer().PlayerId, assetId, action, authority, operationalState, target, displayName);
+
+    public FleetCommandRecord ManageFleetFor(string commandId, string playerId, string assetId, FleetCommandAction action, INetworkRoleDetector authority,
+        FleetOperationalState? operationalState = null, AssetOwnerRef? target = null, string? displayName = null)
     {
         lock (gate)
         {
-            var player = EnsureLocalPlayer();
+            var player = EnsurePersistentPlayer(playerId);
             var fleet = current!.Fleet.Single(x => x.AssetId == assetId);
             var ownership = current.Ownership.Single(x => x.AssetId == assetId);
             return new FleetManagementEngine(current, authority).Execute(new FleetCommand
@@ -650,10 +772,13 @@ public sealed class AcquisitionRuntimeStateProvider : IRuntimeStatePayloadProvid
     }
 
     public VehicleResaleQuote PrepareLocalResaleQuote(string quoteId, string assetId, long proceeds, INetworkRoleDetector authority, IAssetReleaseGuard releaseGuard, IExistingVehicleOwnershipAdapter world)
+        => PrepareResaleQuoteFor(quoteId, EnsureLocalPlayer().PlayerId, assetId, proceeds, authority, releaseGuard, world);
+
+    public VehicleResaleQuote PrepareResaleQuoteFor(string quoteId, string playerId, string assetId, long proceeds, INetworkRoleDetector authority, IAssetReleaseGuard releaseGuard, IExistingVehicleOwnershipAdapter world)
     {
         lock (gate)
         {
-            var player = EnsureLocalPlayer();
+            var player = EnsurePersistentPlayer(playerId);
             var acquisition = current!.Acquisitions.LastOrDefault(x => x.AssetId == assetId && x.State == AcquisitionState.Succeeded);
             if (acquisition == null) throw new InvalidOperationException("No frozen acquisition reference is available for this asset.");
             var reference = Math.Max(acquisition.ReferenceValue, acquisition.Price);
@@ -663,11 +788,14 @@ public sealed class AcquisitionRuntimeStateProvider : IRuntimeStatePayloadProvid
     }
 
     public AssetBundle CreateLocalBundle(string commandId, IReadOnlyList<string> assetIds, INetworkRoleDetector authority)
+        => CreateBundleFor(commandId, EnsureLocalPlayer().PlayerId, assetIds, authority);
+
+    public AssetBundle CreateBundleFor(string commandId, string playerId, IReadOnlyList<string> assetIds, INetworkRoleDetector authority)
     {
         lock (gate)
         {
             if (!NetworkAuthorityPolicy.CanExecuteEconomy(authority.Detect(), out _)) throw new InvalidOperationException("Host authority is required.");
-            var player = EnsureLocalPlayer();
+            var player = EnsurePersistentPlayer(playerId);
             var ids = (assetIds ?? Array.Empty<string>()).Where(x => !string.IsNullOrWhiteSpace(x)).Distinct(StringComparer.Ordinal).OrderBy(x => x, StringComparer.Ordinal).ToList();
             if (ids.Count < 2) throw new InvalidOperationException("Select at least two owned assets for a bundle.");
             var fingerprint = string.Join(",", ids);
@@ -713,10 +841,13 @@ public sealed class AcquisitionRuntimeStateProvider : IRuntimeStatePayloadProvid
     }
 
     public VehicleResaleRecord SellLocalVehicle(string commandId, string quoteId, INetworkRoleDetector authority, IAssetReleaseGuard releaseGuard, IExistingVehicleOwnershipAdapter world)
+        => SellVehicleFor(commandId, EnsureLocalPlayer().PlayerId, quoteId, authority, releaseGuard, world);
+
+    public VehicleResaleRecord SellVehicleFor(string commandId, string playerId, string quoteId, INetworkRoleDetector authority, IAssetReleaseGuard releaseGuard, IExistingVehicleOwnershipAdapter world)
     {
         lock (gate)
         {
-            var player = EnsureLocalPlayer();
+            var player = EnsurePersistentPlayer(playerId);
             var quote = current!.ResaleQuotes.Single(x => x.QuoteId == quoteId);
             var fleet = current.Fleet.Single(x => x.AssetId == quote.AssetId);
             var ownership = current.Ownership.Single(x => x.AssetId == quote.AssetId);
@@ -785,14 +916,16 @@ public sealed class AcquisitionRuntimeStateProvider : IRuntimeStatePayloadProvid
     }
 
     public TriagePlan CreateLocalTriagePlan(string commandId, string planId, string assignmentId, IReadOnlyList<string> orderedTrackIds, INetworkRoleDetector authority)
-    {
-        lock (gate) { RequireHost(authority); return new TriageAssistanceEngine(current!, authority, new DisabledSelfShuntTriagePort()).CreatePlan(commandId, EnsureLocalPlayer().PlayerId, planId, assignmentId, TriageAssistanceLevel.PlanningOnly, orderedTrackIds); }
-    }
+        => CreateTriagePlanFor(commandId, EnsureLocalPlayer().PlayerId, planId, assignmentId, orderedTrackIds, authority);
+
+    public TriagePlan CreateTriagePlanFor(string commandId, string playerId, string planId, string assignmentId, IReadOnlyList<string> orderedTrackIds, INetworkRoleDetector authority)
+    { lock (gate) { RequireHost(authority); return new TriageAssistanceEngine(current!, authority, new DisabledSelfShuntTriagePort()).CreatePlan(commandId, EnsurePersistentPlayer(playerId).PlayerId, planId, assignmentId, TriageAssistanceLevel.PlanningOnly, orderedTrackIds); } }
 
     public TriagePlan CancelLocalTriagePlan(string commandId, string planId, INetworkRoleDetector authority)
-    {
-        lock (gate) { RequireHost(authority); return new TriageAssistanceEngine(current!, authority, new DisabledSelfShuntTriagePort()).Cancel(commandId, EnsureLocalPlayer().PlayerId, planId); }
-    }
+        => CancelTriagePlanFor(commandId, EnsureLocalPlayer().PlayerId, planId, authority);
+
+    public TriagePlan CancelTriagePlanFor(string commandId, string playerId, string planId, INetworkRoleDetector authority)
+    { lock (gate) { RequireHost(authority); return new TriageAssistanceEngine(current!, authority, new DisabledSelfShuntTriagePort()).Cancel(commandId, EnsurePersistentPlayer(playerId).PlayerId, planId); } }
 
     private static VehicleAcquisitionSnapshot Empty(string checkpointId) => new VehicleAcquisitionSnapshot
     {
