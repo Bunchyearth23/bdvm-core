@@ -90,6 +90,9 @@ public sealed class RuntimeSaveSettings
     [DataMember(Name = "startingPersonalBalance", Order = 27)]
     public long StartingPersonalBalance { get; set; } = 2000;
 
+    [DataMember(Name = "neutralizeVanillaLicenses", Order = 28)]
+    public bool NeutralizeVanillaLicenses { get; set; } = true;
+
     public static RuntimeSaveSettings SafeDefaults() => new RuntimeSaveSettings();
 
     public static RuntimeSaveSettings Load(string path, Action<string>? warning = null)

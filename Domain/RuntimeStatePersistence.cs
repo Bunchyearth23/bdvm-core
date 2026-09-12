@@ -502,6 +502,30 @@ public sealed class AcquisitionRuntimeStateProvider : IRuntimeStatePayloadProvid
         }
     }
 
+    public InitialDeliveryGrant ReconcileInitialDeliveryFor(string playerId, string grantId, INetworkRoleDetector authority,
+        IInitialDeliveryPort delivery, IInitialDeliveryCheckpointPort? checkpoint = null)
+    {
+        lock (gate)
+        {
+            RequireHost(authority);
+            var player = EnsurePersistentPlayer(playerId);
+            var grant = current!.InitialDeliveries.Single(x => x.GrantId == grantId);
+            var authorized = grant.AuthorizedOperator ?? grant.Owner;
+            if (authorized.Kind == AssetOwnerKind.Player)
+            {
+                if (authorized.OwnerId != player.PlayerId) throw new UnauthorizedAccessException("Only the authorized player can reconcile this rolling stock delivery.");
+            }
+            else
+            {
+                if (authorized.Kind != AssetOwnerKind.Company || player.CompanyId != authorized.OwnerId) throw new UnauthorizedAccessException("Requester does not belong to the authorized company.");
+                var company = current.Economy.Companies.Single(x => x.CompanyId == authorized.OwnerId);
+                if (company.Liquidating || (company.LeaderId != player.PlayerId && (!company.DelegatedPermissions.TryGetValue(player.PlayerId, out var rights) || !rights.Contains(CompanyPermission.ManageFleet))))
+                    throw new UnauthorizedAccessException("ManageFleet permission is required.");
+            }
+            return new InitialDeliveryEngine(current, authority, delivery, checkpoint).Reconcile(grantId);
+        }
+    }
+
     public LeaseContract CreateLocalLeaseOffer(string leaseId, IReadOnlyList<string> assetIds, long deposit, long initialFee, long rent,
         long interval, long duration, long? purchaseOption, decimal condition, long maximumDamageCharge, INetworkRoleDetector authority,
         IAssetReleaseGuard releaseGuard, IExistingVehicleOwnershipAdapter world)
@@ -553,9 +577,35 @@ public sealed class AcquisitionRuntimeStateProvider : IRuntimeStatePayloadProvid
         }
     }
 
+    public long AdvanceEconomicClockWithoutLeasing(LeaseClockAdvance advance, INetworkRoleDetector authority)
+    {
+        lock (gate)
+        {
+            var state = current ?? throw new InvalidOperationException("Runtime state is not initialized from SaveGameData.");
+            if (!NetworkAuthorityPolicy.CanExecuteEconomy(authority.Detect(), out _)) throw new InvalidOperationException("Host authority is required.");
+            if (string.IsNullOrWhiteSpace(advance.CommandId) || advance.ActiveGameplayTicks < 0 || advance.SleepTicks < 0 || advance.FastTravelTicks < 0)
+                throw new ArgumentException("Invalid economic clock advance.");
+            var fingerprint = string.Join("|", "economic-clock-no-leasing", advance.ActiveGameplayTicks, advance.SleepTicks, advance.FastTravelTicks, advance.SessionOpen, advance.Paused);
+            var known = state.LeaseActions.SingleOrDefault(value => value.CommandId == advance.CommandId);
+            if (known != null)
+            {
+                if (known.Fingerprint != fingerprint) throw new InvalidOperationException("Economic clock command ID payload conflict.");
+                return state.LeaseClock.ActiveTick;
+            }
+            var delta = !advance.SessionOpen || advance.Paused ? 0 : checked(advance.ActiveGameplayTicks + advance.SleepTicks + advance.FastTravelTicks);
+            state.LeaseClock.ActiveTick = checked(state.LeaseClock.ActiveTick + delta);
+            state.LeaseClock.Version++;
+            state.LeaseActions.Add(new LeaseActionRecord { CommandId = advance.CommandId, Fingerprint = fingerprint, LeaseId = "disabled", State = LeaseActionState.Succeeded, ResultCode = "economic-clock-advanced-without-leasing", Amount = delta });
+            return state.LeaseClock.ActiveTick;
+        }
+    }
+
     public LeaseActionRecord ReturnLocalLease(string commandId, string leaseId, decimal condition, INetworkRoleDetector authority,
         IAssetReleaseGuard releaseGuard, IExistingVehicleOwnershipAdapter world)
         => ReturnLeaseFor(commandId, EnsureLocalPlayer().PlayerId, leaseId, condition, authority, releaseGuard, world);
+
+    public FleetCommandRecord ConfirmPhysicalFleetRemoval(string commandId, string persistentCarGuid, string source, INetworkRoleDetector authority)
+    { lock (gate) { return new FleetManagementEngine(current ?? throw new InvalidOperationException("Runtime state is not initialized from SaveGameData."), authority).ConfirmPhysicalRemoval(commandId, persistentCarGuid, source); } }
 
     public LeaseActionRecord ReturnLeaseFor(string commandId, string playerId, string leaseId, decimal condition, INetworkRoleDetector authority,
         IAssetReleaseGuard releaseGuard, IExistingVehicleOwnershipAdapter world)

@@ -22,6 +22,16 @@ public sealed class DedicatedAuthorityState
     [DataMember(Name = "commands", Order = 5)] public List<MissionAssignmentCommand> Commands { get; set; } = new List<MissionAssignmentCommand>();
     [DataMember(Name = "restartCount", Order = 6)] public int RestartCount { get; set; }
     [DataMember(Name = "rollbackCount", Order = 7)] public int RollbackCount { get; set; }
+    [DataMember(Name = "webCommands", Order = 8)] public List<DedicatedWebCommand> WebCommands { get; set; } = new List<DedicatedWebCommand>();
+}
+
+[DataContract]
+public sealed class DedicatedWebCommand
+{
+    [DataMember(Order = 1)] public string Principal { get; set; } = "";
+    [DataMember(Order = 2)] public string Key { get; set; } = "";
+    [DataMember(Order = 3)] public string Fingerprint { get; set; } = "";
+    [DataMember(Order = 4)] public string ResultJson { get; set; } = "";
 }
 
 public sealed class DedicatedCheckpointRecord
@@ -72,7 +82,17 @@ public sealed class DedicatedAuthorityHost
         {
             RequireHost(); if (string.IsNullOrWhiteSpace(peerSessionId) || string.IsNullOrWhiteSpace(claimedPersistentPlayerId) || !authenticator.Authenticate(peerSessionId, claimedPersistentPlayerId, credential)) throw new InvalidOperationException("Dedicated peer authentication refused.");
             if (connectedPeers.TryGetValue(peerSessionId, out var existing) && existing != claimedPersistentPlayerId) throw new InvalidOperationException("A peer session cannot change persistent identity.");
-            connectedPeers[peerSessionId] = claimedPersistentPlayerId; var economy = new CompanyEconomyEngine(Current.Economy); economy.EnsurePlayer(claimedPersistentPlayerId, 0); if (!Current.DedicatedAuthority.KnownPlayerIds.Contains(claimedPersistentPlayerId)) Current.DedicatedAuthority.KnownPlayerIds.Add(claimedPersistentPlayerId); SaveInternal(); return Current.Economy.Players.Single(x => x.PlayerId == claimedPersistentPlayerId);
+            var before = VehicleAcquisitionPersistence.Serialize(Current);
+            try
+            {
+                var economy = new CompanyEconomyEngine(Current.Economy);
+                economy.EnsurePlayer(claimedPersistentPlayerId, 0);
+                if (!Current.DedicatedAuthority.KnownPlayerIds.Contains(claimedPersistentPlayerId)) Current.DedicatedAuthority.KnownPlayerIds.Add(claimedPersistentPlayerId);
+                SaveInternal();
+                connectedPeers[peerSessionId] = claimedPersistentPlayerId;
+                return Current.Economy.Players.Single(x => x.PlayerId == claimedPersistentPlayerId);
+            }
+            catch { Rollback(before); throw; }
         }
     }
 
@@ -134,6 +154,9 @@ public static class DedicatedAuthorityValidation
 {
     public static void Validate(DedicatedAuthorityState state)
     {
+        // DataContract deserialization bypasses initializers on checkpoints predating this field.
+        if (state != null && state.WebCommands == null) state.WebCommands = new List<DedicatedWebCommand>();
+        if (state != null && (state.WebCommands.Count > 10000 || state.WebCommands.Any(x => x == null || string.IsNullOrWhiteSpace(x.Principal) || string.IsNullOrWhiteSpace(x.Key) || string.IsNullOrWhiteSpace(x.Fingerprint) || string.IsNullOrWhiteSpace(x.ResultJson)) || state.WebCommands.GroupBy(x => new { x.Principal, x.Key }).Any(x => x.Count() != 1))) throw new InvalidOperationException("Invalid dedicated web command ledger.");
         if (state == null || state.CheckpointRevision < 0 || state.ClockPolicy == null || state.ClockPolicy.MaximumAdvanceTicks <= 0 || state.KnownPlayerIds.Any(string.IsNullOrWhiteSpace) || state.KnownPlayerIds.Distinct(StringComparer.Ordinal).Count() != state.KnownPlayerIds.Count || state.Commands.GroupBy(x => x.CommandId).Any(x => x.Count() != 1) || state.RestartCount < 0 || state.RollbackCount < 0) throw new InvalidOperationException("Invalid dedicated authority state.");
     }
 }

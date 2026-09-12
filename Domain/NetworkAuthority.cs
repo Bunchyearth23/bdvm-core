@@ -6,7 +6,8 @@ public enum NetworkRole
     SoloHost,
     MultiplayerHost,
     MultiplayerClient,
-    Indeterminate
+    Indeterminate,
+    ExternalAuthorityClient
 }
 
 public sealed class NetworkApiState
@@ -15,6 +16,7 @@ public sealed class NetworkApiState
     public bool IsConnected { get; set; }
     public bool IsHost { get; set; }
     public bool IsSinglePlayer { get; set; }
+    public bool ExternalAuthorityConfigured { get; set; }
 }
 
 public sealed class NetworkRoleReport
@@ -38,6 +40,9 @@ public static class NetworkAuthorityPolicy
 {
     public static NetworkRoleReport Classify(NetworkApiState state)
     {
+        if (state.ExternalAuthorityConfigured)
+            return new NetworkRoleReport { Role = NetworkRole.ExternalAuthorityClient, HasAuthority = false,
+                Detail = "The dedicated backend owns economic authority; the game cannot fall back to local writes." };
         if (!state.ApiAvailable)
             return Authoritative(NetworkRole.Local, "Multiplayer API is unavailable; local authority.");
 
@@ -64,6 +69,11 @@ public static class NetworkAuthorityPolicy
 
     public static bool CanExecuteEconomy(NetworkRoleReport role, out string reason)
     {
+        if (role.Role == NetworkRole.ExternalAuthorityClient)
+        {
+            reason = "The dedicated backend owns economic authority; send an authenticated intention to that backend.";
+            return false;
+        }
         if (role.HasAuthority)
         {
             reason = role.Detail;
