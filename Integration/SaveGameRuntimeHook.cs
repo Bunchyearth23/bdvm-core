@@ -17,9 +17,12 @@ public static class SaveGameRuntimeHook
     private static IHostSaveUpdateHandler? handler;
     private static Action<string>? info;
     private static Action<string, Exception>? error;
+    private static readonly SaveGameAutomaticUpdateGate automaticUpdateGate = new();
+    private static bool automaticUpdateRequired = true;
     public static bool Enabled => flags.EnableSaveGameDataHook;
-    public static void Configure(SaveGameFeatureFlags configuredFlags, INetworkRoleDetector roleDetector, IHostSaveUpdateHandler updateHandler, Action<string>? information = null, Action<string, Exception>? failure = null) { flags = configuredFlags ?? throw new ArgumentNullException(nameof(configuredFlags)); roles = roleDetector ?? throw new ArgumentNullException(nameof(roleDetector)); handler = updateHandler ?? throw new ArgumentNullException(nameof(updateHandler)); info = information; error = failure; }
-    public static void Reset() { flags = SaveGameFeatureFlags.SafeDefaults(); roles = null; handler = null; info = null; error = null; }
+    public static void Configure(SaveGameFeatureFlags configuredFlags, INetworkRoleDetector roleDetector, IHostSaveUpdateHandler updateHandler, Action<string>? information = null, Action<string, Exception>? failure = null) { flags = configuredFlags ?? throw new ArgumentNullException(nameof(configuredFlags)); roles = roleDetector ?? throw new ArgumentNullException(nameof(roleDetector)); handler = updateHandler ?? throw new ArgumentNullException(nameof(updateHandler)); info = information; error = failure; automaticUpdateGate.Reset(); automaticUpdateRequired = true; }
+    public static void Reset() { flags = SaveGameFeatureFlags.SafeDefaults(); roles = null; handler = null; info = null; error = null; automaticUpdateGate.Reset(); automaticUpdateRequired = true; }
+    public static void MarkDirty() { if (Enabled) automaticUpdateRequired = true; }
     public static void OnUpdateInternalData(SaveGameManager manager)
     {
         if (!Enabled) return;
@@ -29,12 +32,18 @@ public static class SaveGameRuntimeHook
     }
     public static bool TryOnUpdateInternalData(SaveGameManager manager)
     {
-        try { OnUpdateInternalData(manager); if (Enabled) info?.Invoke("Authoritative SaveGameData update completed."); return true; }
+        try { OnUpdateInternalData(manager); if (Enabled && manager?.data != null) { automaticUpdateGate.MarkStaged(manager, manager.data); automaticUpdateRequired = false; } if (Enabled) info?.Invoke("Authoritative SaveGameData update completed."); return true; }
         catch (Exception exception) { error?.Invoke("BDVM SaveGameData update refused; vanilla save continues.", exception); return false; }
+    }
+
+    internal static bool TryOnAutomaticUpdateInternalData(SaveGameManager manager)
+    {
+        if (Enabled && !automaticUpdateRequired && manager?.data != null && automaticUpdateGate.ShouldSkip(manager, manager.data)) return true;
+        return TryOnUpdateInternalData(manager!);
     }
 }
 [HarmonyPatch(typeof(SaveGameManager), "UpdateInternalData")]
-internal static class SaveGameManagerUpdateInternalDataPatch { private static void Postfix(SaveGameManager __instance) => SaveGameRuntimeHook.TryOnUpdateInternalData(__instance); }
+internal static class SaveGameManagerUpdateInternalDataPatch { private static void Postfix(SaveGameManager __instance) => SaveGameRuntimeHook.TryOnAutomaticUpdateInternalData(__instance); }
 
 public sealed class SaveGameDataAtomicNode : IAtomicSaveGameNode
 {

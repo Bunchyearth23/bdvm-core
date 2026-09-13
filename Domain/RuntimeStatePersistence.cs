@@ -472,6 +472,15 @@ public sealed class AcquisitionRuntimeStateProvider : IRuntimeStatePayloadProvid
         IInitialDeliveryCheckpointPort? checkpoint = null)
         => PlaceInitialDeliveryFor(commandId, EnsureLocalPlayer().PlayerId, grantId, trackId, targetKind, authority, delivery, checkpoint);
 
+    public InitialDeliveryGrant PrepareLocalInitialDelivery(string commandId, string grantId, string trackId,
+        InitialDeliveryTargetKind targetKind, INetworkRoleDetector authority, IInitialDeliveryPort delivery,
+        IInitialDeliveryCheckpointPort? checkpoint = null)
+        => PrepareInitialDeliveryFor(commandId, EnsureLocalPlayer().PlayerId, grantId, trackId, targetKind, authority, delivery, checkpoint);
+
+    public InitialDeliveryGrant CompleteLocalInitialDelivery(string commandId, string grantId, InitialDeliveryPortResult result,
+        INetworkRoleDetector authority, IInitialDeliveryPort delivery, IInitialDeliveryCheckpointPort? checkpoint = null)
+        => CompleteInitialDeliveryFor(commandId, EnsureLocalPlayer().PlayerId, grantId, result, authority, delivery, checkpoint);
+
     public InitialDeliveryGrant PlaceInitialDeliveryFor(string commandId, string playerId, string grantId, string trackId,
         InitialDeliveryTargetKind targetKind, INetworkRoleDetector authority, IInitialDeliveryPort delivery,
         IInitialDeliveryCheckpointPort? checkpoint = null)
@@ -489,6 +498,38 @@ public sealed class AcquisitionRuntimeStateProvider : IRuntimeStatePayloadProvid
                 TargetKind = targetKind,
                 ExpectedGrantVersion = grant.Version
             });
+        }
+    }
+
+    public InitialDeliveryGrant PrepareInitialDeliveryFor(string commandId, string playerId, string grantId, string trackId,
+        InitialDeliveryTargetKind targetKind, INetworkRoleDetector authority, IInitialDeliveryPort delivery,
+        IInitialDeliveryCheckpointPort? checkpoint = null)
+    {
+        lock (gate)
+        {
+            var player = EnsurePersistentPlayer(playerId);
+            var grant = current!.InitialDeliveries.Single(x => x.GrantId == grantId);
+            return new InitialDeliveryEngine(current, authority, delivery, checkpoint).Prepare(new InitialDeliveryCommand
+            {
+                CommandId = commandId,
+                RequesterId = player.PlayerId,
+                GrantId = grantId,
+                TargetTrackId = trackId,
+                TargetKind = targetKind,
+                ExpectedGrantVersion = grant.Version
+            });
+        }
+    }
+
+    public InitialDeliveryGrant CompleteInitialDeliveryFor(string commandId, string playerId, string grantId,
+        InitialDeliveryPortResult result, INetworkRoleDetector authority, IInitialDeliveryPort delivery,
+        IInitialDeliveryCheckpointPort? checkpoint = null)
+    {
+        lock (gate)
+        {
+            var player = EnsurePersistentPlayer(playerId);
+            return new InitialDeliveryEngine(current ?? throw new InvalidOperationException("Runtime state is not initialized from SaveGameData."), authority, delivery, checkpoint)
+                .Complete(commandId, player.PlayerId, grantId, result);
         }
     }
 
