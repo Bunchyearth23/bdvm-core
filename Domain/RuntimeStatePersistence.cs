@@ -10,10 +10,24 @@ public interface IRuntimeStatePayloadProvider
     string Provide(string checkpointId, string? persistedPayload);
 }
 
+public sealed class RuntimeStatePayload
+{
+    public string CheckpointId { get; set; } = "";
+    public string Payload { get; set; } = "";
+    public long Revision { get; set; }
+}
+
 public sealed class AcquisitionRuntimeStateProvider : IRuntimeStatePayloadProvider
 {
     private readonly object gate = new object();
     private VehicleAcquisitionSnapshot? current;
+    private long revision;
+    private string? lastStagedPayload;
+
+    public long Revision
+    {
+        get { lock (gate) return revision; }
+    }
 
     public VehicleAcquisitionSnapshot? Current
     {
@@ -29,6 +43,11 @@ public sealed class AcquisitionRuntimeStateProvider : IRuntimeStatePayloadProvid
         }
     }
 
+    public void ResetForLoad()
+    {
+        lock (gate) { current = null; lastStagedPayload = null; revision = checked(revision + 1); }
+    }
+
     public string Provide(string checkpointId, string? persistedPayload)
     {
         if (string.IsNullOrWhiteSpace(checkpointId))
@@ -37,14 +56,187 @@ public sealed class AcquisitionRuntimeStateProvider : IRuntimeStatePayloadProvid
         lock (gate)
         {
             if (current == null)
+            {
                 current = string.IsNullOrWhiteSpace(persistedPayload)
                     ? Empty(checkpointId)
                     : VehicleAcquisitionPersistence.Deserialize(persistedPayload!, checkpointId);
+                revision = 1;
+                lastStagedPayload = null;
+            }
             else if (!string.Equals(current.CheckpointId, checkpointId, StringComparison.Ordinal))
                 throw new InvalidDataException("The in-memory BDVM state belongs to another career or branch.");
 
-            return VehicleAcquisitionPersistence.Serialize(current);
+            var serialized = VehicleAcquisitionPersistence.Serialize(current);
+            if (!string.Equals(lastStagedPayload, serialized, StringComparison.Ordinal))
+            {
+                revision = checked(revision + 1);
+                lastStagedPayload = serialized;
+            }
+            return serialized;
         }
+    }
+
+    // Runtime workers may process a serialized copy, but they must never receive
+    // the mutable object graph exposed to Unity and web command handlers.  The
+    // payload is captured under the provider lock and can be committed only when
+    // the live state is still byte-for-byte identical to that capture.
+    public string CapturePayload()
+    {
+        lock (gate)
+        {
+            if (current == null) throw new InvalidOperationException("Runtime state is not initialized from SaveGameData.");
+            return lastStagedPayload ?? VehicleAcquisitionPersistence.Serialize(current);
+        }
+    }
+
+    public RuntimeStatePayload CaptureStatePayload()
+    {
+        lock (gate)
+        {
+            if (current == null) throw new InvalidOperationException("Runtime state is not initialized from SaveGameData.");
+            return new RuntimeStatePayload
+            {
+                CheckpointId = current.CheckpointId,
+                Payload = lastStagedPayload ?? VehicleAcquisitionPersistence.Serialize(current),
+                Revision = revision
+            };
+        }
+    }
+
+    public DetachedRuntimeState CaptureDetachedState()
+    {
+        lock (gate)
+        {
+            if (current == null) throw new InvalidOperationException("Runtime state is not initialized from SaveGameData.");
+            return new DetachedRuntimeState(RuntimeStateCopy.Capture(current), revision);
+        }
+    }
+
+    public RuntimeStateCapture BeginDetachedStateCapture(Func<bool>? stillCurrent = null)
+    {
+        lock (gate)
+        {
+            var source = current ?? throw new InvalidOperationException("Runtime state is not initialized from SaveGameData.");
+            var capturedRevision = revision;
+            return new RuntimeStateCapture(source, capturedRevision, () =>
+            {
+                lock (gate) return ReferenceEquals(current, source) && revision == capturedRevision && (stillCurrent?.Invoke() ?? true);
+            });
+        }
+    }
+
+    public RuntimeStateCapture BeginPeriodicEconomicCapture(Func<bool>? stillCurrent = null)
+    {
+        lock (gate)
+        {
+            var source = current ?? throw new InvalidOperationException("Runtime state is not initialized from SaveGameData.");
+            var capturedRevision = revision;
+            return new RuntimeStateCapture(PeriodicEconomicProjection.Select(source), capturedRevision, () =>
+            {
+                lock (gate) return ReferenceEquals(current, source) && revision == capturedRevision && (stillCurrent?.Invoke() ?? true);
+            });
+        }
+    }
+
+    public bool TryApplyPeriodicEconomicDelta(long expectedRevision, PeriodicEconomicDelta delta)
+    {
+        lock (gate)
+        {
+            if (current == null || revision != expectedRevision || revision == long.MaxValue || !delta.TryApply(current)) return false;
+            InvalidatePreparedPayloadLocked(); return true;
+        }
+    }
+
+    public void InitializeFromDetachedState(DetachedRuntimeState captured)
+    {
+        if (captured == null) throw new ArgumentNullException(nameof(captured));
+        VehicleAcquisitionPersistence.Validate(captured.Snapshot);
+        lock (gate) { current = captured.Snapshot; revision = captured.Revision; lastStagedPayload = null; }
+    }
+
+    // Initializes an isolated worker provider without serializing the payload a
+    // second time.  The resulting graph is still deserialized and validated, so
+    // no Unity-owned or live provider object crosses the worker boundary.
+    public void InitializeFromCapturedPayload(string checkpointId, string payload, long capturedRevision = 1)
+    {
+        if (string.IsNullOrWhiteSpace(checkpointId)) throw new ArgumentException("A checkpoint ID is required.", nameof(checkpointId));
+        if (string.IsNullOrWhiteSpace(payload)) throw new ArgumentException("A captured runtime payload is required.", nameof(payload));
+        lock (gate)
+        {
+            current = VehicleAcquisitionPersistence.Deserialize(payload, checkpointId);
+            revision = Math.Max(1, capturedRevision);
+            lastStagedPayload = payload;
+        }
+    }
+
+    public bool TryCommitPreparedSnapshot(long expectedRevision, VehicleAcquisitionSnapshot replacement)
+        => TryCommitPreparedSnapshot(expectedRevision, replacement, null);
+
+    public bool TryCommitPreparedSnapshot(long expectedRevision, VehicleAcquisitionSnapshot replacement, string? preparedPayload)
+    {
+        if (replacement == null) throw new ArgumentNullException(nameof(replacement));
+        if (preparedPayload != null && string.IsNullOrWhiteSpace(preparedPayload)) throw new ArgumentException("A prepared payload cannot be empty.", nameof(preparedPayload));
+        lock (gate)
+        {
+            if (current == null) throw new InvalidOperationException("Runtime state is not initialized from SaveGameData.");
+            if (revision != expectedRevision || !string.Equals(current.CheckpointId, replacement.CheckpointId, StringComparison.Ordinal)) return false;
+            current = replacement;
+            revision = checked(revision + 1);
+            lastStagedPayload = preparedPayload;
+            return true;
+        }
+    }
+
+    public bool TryReplaceSnapshot(long expectedRevision, VehicleAcquisitionSnapshot replacement)
+    {
+        if (replacement == null) throw new ArgumentNullException(nameof(replacement));
+        VehicleAcquisitionPersistence.Validate(replacement);
+        return TryCommitPreparedSnapshot(expectedRevision, replacement);
+    }
+
+    public bool TryReplacePayload(long expectedRevision, string replacementPayload)
+    {
+        if (string.IsNullOrWhiteSpace(replacementPayload)) throw new ArgumentException("A replacement runtime payload is required.", nameof(replacementPayload));
+        lock (gate)
+        {
+            if (current == null) throw new InvalidOperationException("Runtime state is not initialized from SaveGameData.");
+            if (revision != expectedRevision) return false;
+            current = VehicleAcquisitionPersistence.Deserialize(replacementPayload, current.CheckpointId);
+            revision = checked(revision + 1);
+            lastStagedPayload = null;
+            return true;
+        }
+    }
+
+    public bool TryReplacePayload(string expectedPayload, string replacementPayload)
+    {
+        if (string.IsNullOrWhiteSpace(expectedPayload)) throw new ArgumentException("An expected runtime payload is required.", nameof(expectedPayload));
+        if (string.IsNullOrWhiteSpace(replacementPayload)) throw new ArgumentException("A replacement runtime payload is required.", nameof(replacementPayload));
+        lock (gate)
+        {
+            if (current == null) throw new InvalidOperationException("Runtime state is not initialized from SaveGameData.");
+            var currentPayload = VehicleAcquisitionPersistence.Serialize(current);
+            if (!string.Equals(currentPayload, expectedPayload, StringComparison.Ordinal)) return false;
+            current = VehicleAcquisitionPersistence.Deserialize(replacementPayload, current.CheckpointId);
+            revision = checked(revision + 1);
+            lastStagedPayload = null;
+            return true;
+        }
+    }
+
+    public void MarkStateChanged()
+    {
+        lock (gate)
+        {
+            if (current == null) return;
+            InvalidatePreparedPayloadLocked();
+        }
+    }
+
+    private void InvalidatePreparedPayloadLocked()
+    {
+        revision = checked(revision + 1);
+        lastStagedPayload = null;
     }
 
     public PlayerEconomicState EnsureLocalPlayer(long initialPersonalBalance = 0)
@@ -52,6 +244,7 @@ public sealed class AcquisitionRuntimeStateProvider : IRuntimeStatePayloadProvid
         lock (gate)
         {
             if (current == null) throw new InvalidOperationException("Runtime state is not initialized from SaveGameData.");
+            InvalidatePreparedPayloadLocked();
             var playerId = LocalPlayerId!;
             var engine = new CompanyEconomyEngine(current.Economy);
             var existed = current.Economy.Players.Any(x => x.PlayerId == playerId);
@@ -74,6 +267,7 @@ public sealed class AcquisitionRuntimeStateProvider : IRuntimeStatePayloadProvid
         lock (gate)
         {
             if (current == null) throw new InvalidOperationException("Runtime state is not initialized from SaveGameData.");
+            InvalidatePreparedPayloadLocked();
             var engine = new CompanyEconomyEngine(current.Economy);
             engine.EnsurePlayer(playerId, initialPersonalBalance);
             return current.Economy.Players.Single(x => x.PlayerId == playerId);
@@ -633,6 +827,7 @@ public sealed class AcquisitionRuntimeStateProvider : IRuntimeStatePayloadProvid
                 if (known.Fingerprint != fingerprint) throw new InvalidOperationException("Economic clock command ID payload conflict.");
                 return state.LeaseClock.ActiveTick;
             }
+            InvalidatePreparedPayloadLocked();
             var delta = !advance.SessionOpen || advance.Paused ? 0 : checked(advance.ActiveGameplayTicks + advance.SleepTicks + advance.FastTravelTicks);
             state.LeaseClock.ActiveTick = checked(state.LeaseClock.ActiveTick + delta);
             state.LeaseClock.Version++;

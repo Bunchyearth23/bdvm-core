@@ -19,15 +19,37 @@ public static class SaveGameRuntimeHook
     private static Action<string, Exception>? error;
     private static readonly SaveGameAutomaticUpdateGate automaticUpdateGate = new();
     private static bool automaticUpdateRequired = true;
+    private static long mutationVersion;
+    public static long MutationVersion => System.Threading.Interlocked.Read(ref mutationVersion);
     public static bool Enabled => flags.EnableSaveGameDataHook;
-    public static void Configure(SaveGameFeatureFlags configuredFlags, INetworkRoleDetector roleDetector, IHostSaveUpdateHandler updateHandler, Action<string>? information = null, Action<string, Exception>? failure = null) { flags = configuredFlags ?? throw new ArgumentNullException(nameof(configuredFlags)); roles = roleDetector ?? throw new ArgumentNullException(nameof(roleDetector)); handler = updateHandler ?? throw new ArgumentNullException(nameof(updateHandler)); info = information; error = failure; automaticUpdateGate.Reset(); automaticUpdateRequired = true; }
-    public static void Reset() { flags = SaveGameFeatureFlags.SafeDefaults(); roles = null; handler = null; info = null; error = null; automaticUpdateGate.Reset(); automaticUpdateRequired = true; }
-    public static void MarkDirty() { if (Enabled) automaticUpdateRequired = true; }
+    public static void Configure(SaveGameFeatureFlags configuredFlags, INetworkRoleDetector roleDetector, IHostSaveUpdateHandler updateHandler, Action<string>? information = null, Action<string, Exception>? failure = null) { (handler as IDisposable)?.Dispose(); flags = configuredFlags ?? throw new ArgumentNullException(nameof(configuredFlags)); roles = roleDetector ?? throw new ArgumentNullException(nameof(roleDetector)); handler = updateHandler ?? throw new ArgumentNullException(nameof(updateHandler)); info = information; error = failure; automaticUpdateGate.Reset(); automaticUpdateRequired = true; }
+    public static void Reset() { (handler as IDisposable)?.Dispose(); flags = SaveGameFeatureFlags.SafeDefaults(); roles = null; handler = null; info = null; error = null; automaticUpdateGate.Reset(); automaticUpdateRequired = true; }
+    public static void RecordPeriodic(string serializedDelta) => (handler as IJournalSaveUpdateHandler)?.RecordPeriodic(serializedDelta);
+    public static void PumpJournal() => (handler as IJournalSaveUpdateHandler)?.Pump();
+    public static void ResetCareer()
+    {
+        (handler as IJournalSaveUpdateHandler)?.ResetCareer();
+        MarkDirty(); automaticUpdateGate.Reset();
+    }
+    internal static PersistentSaveTicket? BeginPhysicalSave(SaveGameData data)
+    {
+        if (!Enabled || roles == null || !NetworkAuthorityPolicy.CanExecuteEconomy(roles.Detect(), out _)) return null;
+        try { return (handler as IJournalSaveUpdateHandler)?.BeginSave(data); }
+        catch (Exception exception) { error?.Invoke("Journal save ticket could not be attached; the embedded BDVM recovery payload remains in the game save.", exception); return null; }
+    }
+    internal static void CompletePhysicalSave(PersistentSaveTicket? ticket, ISaveGame? save)
+    {
+        if (ticket == null || save == null) return;
+        try { (handler as IJournalSaveUpdateHandler)?.CompleteSave(ticket, save.BasePath); }
+        catch (Exception exception) { error?.Invoke("Game save completed but its journal checkpoint could not be scheduled.", exception); }
+    }
+    public static void MarkDirty() { System.Threading.Interlocked.Increment(ref mutationVersion); if (Enabled) automaticUpdateRequired = true; }
     public static void OnUpdateInternalData(SaveGameManager manager)
     {
         if (!Enabled) return;
         if (manager?.data == null || roles == null || handler == null) throw new InvalidOperationException("Save hook is enabled but not completely configured.");
         if (!NetworkAuthorityPolicy.CanExecuteEconomy(roles.Detect(), out var reason)) throw new InvalidOperationException("BDVM SaveGameData write refused: " + reason);
+        System.Threading.Interlocked.Increment(ref mutationVersion);
         handler.Update(manager.data);
     }
     public static bool TryOnUpdateInternalData(SaveGameManager manager)
@@ -44,6 +66,15 @@ public static class SaveGameRuntimeHook
 }
 [HarmonyPatch(typeof(SaveGameManager), "UpdateInternalData")]
 internal static class SaveGameManagerUpdateInternalDataPatch { private static void Postfix(SaveGameManager __instance) => SaveGameRuntimeHook.TryOnAutomaticUpdateInternalData(__instance); }
+
+// Save() and autosave both call DoSaveIO. Its non-null result confirms the game
+// write, unlike UpdateInternalData. Only immutable strings cross to the worker.
+[HarmonyPatch(typeof(SaveGameManager), "DoSaveIO")]
+internal static class SaveGameManagerJournalCheckpointPatch
+{
+    private static void Prefix(SaveGameData __0, out PersistentSaveTicket? __state) => __state = SaveGameRuntimeHook.BeginPhysicalSave(__0);
+    private static void Postfix(ISaveGame? __result, PersistentSaveTicket? __state) => SaveGameRuntimeHook.CompletePhysicalSave(__state, __result);
+}
 
 public sealed class SaveGameDataAtomicNode : IAtomicSaveGameNode
 {
