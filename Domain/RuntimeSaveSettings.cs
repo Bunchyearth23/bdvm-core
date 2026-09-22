@@ -79,7 +79,7 @@ public sealed class RuntimeSaveSettings
     public List<InitialDeliveryTrackRule> InitialDeliveryTracks { get; set; } = new List<InitialDeliveryTrackRule>();
 
     [DataMember(Name = "starterBundleDefinitionIds", Order = 24)]
-    public List<string> StarterBundleDefinitionIds { get; set; } = new List<string> { "LocoDE2", "FlatbedEmpty", "FlatbedEmpty", "FlatbedEmpty" };
+    public List<string> StarterBundleDefinitionIds { get; set; } = new List<string>();
 
     [DataMember(Name = "enableStrictWorldPopulation", Order = 25)]
     public bool EnableStrictWorldPopulation { get; set; }
@@ -88,10 +88,17 @@ public sealed class RuntimeSaveSettings
     public WorldPopulationPolicy WorldPopulationPolicy { get; set; } = WorldPopulationPolicy.StrictDefaults();
 
     [DataMember(Name = "startingPersonalBalance", Order = 27)]
-    public long StartingPersonalBalance { get; set; } = 2000;
+    public long StartingPersonalBalance { get; set; } = 125000;
 
     [DataMember(Name = "neutralizeVanillaLicenses", Order = 28)]
     public bool NeutralizeVanillaLicenses { get; set; } = true;
+
+    [OnDeserializing]
+    private void OnDeserializing(StreamingContext context)
+    {
+        StartingPersonalBalance = 125000;
+        StarterBundleDefinitionIds = new List<string>();
+    }
 
     public static RuntimeSaveSettings SafeDefaults() => new RuntimeSaveSettings();
 
@@ -107,6 +114,9 @@ public sealed class RuntimeSaveSettings
                 var settings = serializer.ReadObject(stream) as RuntimeSaveSettings ?? throw new InvalidDataException("Runtime settings are empty.");
                 if (settings.StartingPersonalBalance < 0 || settings.StartingPersonalBalance > 1_000_000_000_000L)
                     throw new InvalidDataException("The starting personal balance is outside the supported range.");
+                // Upgrade the former stock starter profile, including installed settings.
+                if (settings.StartingPersonalBalance == 2000) settings.StartingPersonalBalance = 125000;
+                settings.StarterBundleDefinitionIds = new List<string>();
                 return settings;
             }
         }

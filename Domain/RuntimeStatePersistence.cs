@@ -261,6 +261,30 @@ public sealed class AcquisitionRuntimeStateProvider : IRuntimeStatePayloadProvid
         }
     }
 
+    public PlayerEconomicState EnsureStartingPlayer(string playerId, long startingBalance, long? externalBalance = null)
+    {
+        if (string.IsNullOrWhiteSpace(playerId)) throw new ArgumentException("A persistent player ID is required.", nameof(playerId));
+        if (startingBalance < 0 || externalBalance < 0) throw new ArgumentOutOfRangeException(nameof(startingBalance));
+        lock (gate)
+        {
+            if (current == null) throw new InvalidOperationException("Runtime state is not initialized from SaveGameData.");
+            var existing = current.Economy.Players.SingleOrDefault(x => x.PlayerId == playerId);
+            if (existing != null) return existing;
+            InvalidatePreparedPayloadLocked();
+            var baseline = externalBalance ?? startingBalance;
+            new CompanyEconomyEngine(current.Economy).EnsurePlayer(playerId, baseline);
+            new ExternalWalletMirrorEngine(current.Economy).Complete(playerId, baseline, "starting-capital:" + playerId);
+            var wallet = current.Economy.Wallets.Single(x => x.Account.Kind == AccountKind.Player && x.Account.OwnerId == playerId);
+            wallet.Balance = startingBalance;
+            wallet.Version++;
+            current.Economy.History.Add(new EconomicHistoryRecord {
+                EventId = "starting-capital:" + playerId, Kind = "starting-capital-granted",
+                ActorIds = new List<string> { playerId }, Fingerprint = startingBalance.ToString(System.Globalization.CultureInfo.InvariantCulture)
+            });
+            return current.Economy.Players.Single(x => x.PlayerId == playerId);
+        }
+    }
+
     public PlayerEconomicState EnsurePersistentPlayer(string playerId, long initialPersonalBalance = 0)
     {
         if (string.IsNullOrWhiteSpace(playerId)) throw new ArgumentException("A persistent player ID is required.", nameof(playerId));
